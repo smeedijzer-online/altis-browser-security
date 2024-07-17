@@ -1,15 +1,15 @@
 <?php
 
-namespace Altis\Security\Browser;
+namespace Smeedijzer\Security\Browser;
 
-use Altis;
+use Smeedijzer;
 use WP_Dependencies;
 use WP_Error;
 use WP_Http;
 
-const INTEGRITY_DATA_KEY = 'altis_integrity_hash';
+const INTEGRITY_DATA_KEY = 'smeedijzer_integrity_hash';
 const INTEGRITY_HASH_ALGO = 'sha384';
-const INTEGRITY_CACHE_GROUP = 'altis_integrity';
+const INTEGRITY_CACHE_GROUP = 'smeedijzer_integrity';
 
 /**
  * Bootstrap.
@@ -19,6 +19,7 @@ const INTEGRITY_CACHE_GROUP = 'altis_integrity';
  * }
  */
 function bootstrap( array $config ) {
+
 	if ( $config['automatic-integrity'] ?? true ) {
 		add_filter( 'script_loader_tag', __NAMESPACE__ . '\\generate_hash_for_script', 0, 3 );
 		add_filter( 'style_loader_tag', __NAMESPACE__ . '\\generate_hash_for_style', 0, 3 );
@@ -36,14 +37,43 @@ function bootstrap( array $config ) {
 		add_action( 'template_redirect', __NAMESPACE__ . '\\send_xss_header' );
 	}
 
+	$use_referrer_header = $config['referrer-header'] ?? true;
+
+	if ( $use_referrer_header ) {
+		add_action( 'template_redirect', function () use ( $use_referrer_header ) {
+			send_referrer_header( $use_referrer_header );
+		} );
+	}
+
+	// ?
+	//add_action('send_headers', function ()  {
+	//	send_origin_headers();
+	//} );
+
+
+	$inline_nonce_for = [];
+
+	if ( $config['nonce-for-inline-scripts'] ?? null ) {
+		$inline_nonce_for[] = 'script';
+	}
+
+	if ( $config['nonce-for-inline-styles'] ?? null ) {
+		$inline_nonce_for[] = 'style';
+	}
+
+	if( ! empty( $inline_nonce_for ) ){
+		output_nonce_for_inline_scripts_styles_buffer_start( $inline_nonce_for );
+		add_action('shutdown', __NAMESPACE__ . '\\output_nonce_for_inline_scripts_styles_buffer_end',  PHP_INT_MAX);
+	}
+
 	if ( $config['content-security-policy'] ?? null ) {
-		add_filter( 'altis.security.browser.content_security_policies', function ( $policies ) use ( $config ) {
+		add_filter( 'smeedijzer.security.browser.content_security_policies', function ( $policies ) use ( $config ) {
 			return array_merge( $policies, $config['content-security-policy'] );
 		}, 0 );
 	}
 
 	if ( $config['report-only-content-security-policy'] ?? null ) {
-		add_filter( 'altis.security.browser.report_only_content_security_policies', function ( $policies ) use ( $config ) {
+		add_filter( 'smeedijzer.security.browser.report_only_content_security_policies', function ( $policies ) use ( $config ) {
 			return array_merge( $policies, $config['report-only-content-security-policy'] );
 		}, 0 );
 	}
@@ -71,7 +101,7 @@ function bootstrap( array $config ) {
 	add_action( 'template_redirect', __NAMESPACE__ . '\\send_normal_csp_header' );
 	add_action( 'template_redirect', __NAMESPACE__ . '\\send_report_only_csp_header' );
 
-	if ( has_filter( 'altis.security.browser.rest_allow_origin' ) ) {
+	if ( has_filter( 'smeedijzer.security.browser.rest_allow_origin' ) ) {
 		add_filter( 'rest_pre_dispatch', __NAMESPACE__ . '\\restrict_cors_origin' );
 	}
 
@@ -79,10 +109,53 @@ function bootstrap( array $config ) {
 	wp_cache_add_global_groups( INTEGRITY_CACHE_GROUP );
 }
 
+function get_nonce(): string
+{
+	static $nonce = null;
+
+	if ($nonce === null) {
+		$nonce = bin2hex(openssl_random_pseudo_bytes(32)); // https://content-security-policy.com/nonce/
+	}
+
+	return $nonce;
+}
+
+function output_nonce_for_inline_scripts_styles_buffer_start($tag = ['script'])
+{
+	ob_start( static function( $buffer ) use ( $tag ) {
+		$nonce = get_nonce(); // Replace this with your nonce retrieval function
+
+		// check if script is in array
+		if( in_array( 'script', $tag, true ) ){
+			$buffer =  preg_replace_callback( '#<script.*?>#', function ( $matches ) use ( $nonce ) {
+				return str_replace( '<script', '<script nonce="'.$nonce.'"', $matches[0] );
+			}, $buffer );
+		}
+
+		if( in_array( 'style', $tag, true ) ){
+			$buffer = preg_replace_callback( '#<style.*?>#', function ( $matches ) use ( $nonce ) {
+				return str_replace( '<style', '<style nonce="'.$nonce.'"', $matches[0] );
+			}, $buffer );
+		}
+
+		return $buffer;
+	} );
+}
+
+function output_nonce_for_inline_scripts_styles_buffer_end()
+{
+	if (ob_get_length()) {
+		ob_end_flush(); // Send the output buffer
+		ob_flush(); // Flush the system output buffer
+		flush(); // Flush the system output buffer
+	}
+}
+
+
 /**
  * Generate an integrity hash for a given path.
  *
- * Provides the `altis.security.browser.pre_generate_hash_for_path` filter to
+ * Provides the `smeedijzer.security.browser.pre_generate_hash_for_path` filter to
  * allow shortcircuiting hash generation if using external build tools
  * or caching.
  *
@@ -91,7 +164,7 @@ function bootstrap( array $config ) {
  * @return string|null Integrity hash (in format "<algo>-<hash>") if available, or null if it could not be generated.
  */
 function generate_hash_for_path( string $path, ?string $version = null ) : ?string {
-	$hash = apply_filters( 'altis.security.browser.pre_generate_hash_for_path', null, $path, $version );
+	$hash = apply_filters( 'smeedijzer.security.browser.pre_generate_hash_for_path', null, $path, $version );
 	if ( ! empty( $hash ) ) {
 		return $hash;
 	}
@@ -106,7 +179,7 @@ function generate_hash_for_path( string $path, ?string $version = null ) : ?stri
 	$data = file_get_contents( $path );
 	$hash = hash( INTEGRITY_HASH_ALGO, $data, true );
 	$value = INTEGRITY_HASH_ALGO . '-' . base64_encode( $hash );
-	$value = apply_filters( 'altis.security.browser.generate_hash_for_path', $value, $path, $version );
+	$value = apply_filters( 'smeedijzer.security.browser.generate_hash_for_path', $value, $path, $version );
 
 	// Cache.
 	wp_cache_set( $cache_key, $value, INTEGRITY_CACHE_GROUP, time() + YEAR_IN_SECONDS );
@@ -169,7 +242,7 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	$asset = $dependencies->query( $handle );
 	if ( ! $asset ) {
 		return new WP_Error(
-			'altis.security.browser.invalid_asset_handle',
+			'smeedijzer.security.browser.invalid_asset_handle',
 			sprintf(
 				'Invalid asset handle %s',
 				$handle
@@ -194,7 +267,7 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	if ( path_is_absolute( $rel_path ) || strpos( $rel_path, '../' ) !== false ) {
 		// Invalid relative path.
 		return new WP_Error(
-			'altis.security.browser.invalid_path',
+			'smeedijzer.security.browser.invalid_path',
 			sprintf(
 				'Path "%s" for %s is invalid',
 				$src,
@@ -205,8 +278,8 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	}
 
 	// Determine root directory.
-	if ( defined( 'Altis\\ROOT_DIR' ) ) {
-		$root = Altis\ROOT_DIR;
+	if ( defined( 'Smeedijzer\\ROOT_DIR' ) ) {
+		$root = Smeedijzer\ROOT_DIR;
 	} else {
 		// Either ABSPATH or directory above.
 		if ( file_exists( ABSPATH . '/wp-config.php' ) ) {
@@ -225,7 +298,7 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	if ( ! file_exists( $actual_path ) ) {
 		// Invalid path.
 		return new WP_Error(
-			'altis.security.browser.file_not_exists',
+			'smeedijzer.security.browser.file_not_exists',
 			sprintf( 'File for %s does not exist', $handle )
 		);
 	}
@@ -235,7 +308,7 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	if ( empty( $hash ) ) {
 		// Couldn't generate a hash.
 		return new WP_Error(
-			'altis.security.browser.could_not_generate_hash',
+			'smeedijzer.security.browser.could_not_generate_hash',
 			sprintf( 'Could not generate hash for %s', $handle )
 		);
 	}
@@ -244,7 +317,7 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	if ( ! $did_set ) {
 		// Couldn't set the hash.
 		return new WP_Error(
-			'altis.security.browser.could_not_set_hash',
+			'smeedijzer.security.browser.could_not_set_hash',
 			sprintf( 'Could not set hash for %s', $handle )
 		);
 	}
@@ -408,6 +481,19 @@ function send_hsts_header( $value ) {
 }
 
 /**
+ * Send Referrer-Policy header.
+ *
+ * @param string $value Referrer-Policy value.
+ */
+function send_referrer_header( $value ) {
+	if ( $value === true ) {
+		$value = 'same-origin';
+	}
+
+	header( sprintf( 'Referrer-Policy: %s', $value ) );
+}
+
+/**
  * Send the frame options header for non-embed pages.
  *
  * The embed page specifically needs to be allowed in frames, but other pages
@@ -443,7 +529,15 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
 
 	// Normalize directive values.
 	foreach ( $value as &$item ) {
-		if ( in_array( $item, $needs_quotes, true ) || strpos( $item, 'nonce-' ) === 0 ) {
+		$set_nonce = str_starts_with( $item, 'set-nonce' );
+
+		if($set_nonce) {
+			$item = str_replace( 'set-nonce', 'nonce-'. get_nonce(), $item );
+		}
+
+		$is_nonce = str_starts_with( $item, 'nonce-' );
+
+		if ( $is_nonce || in_array( $item, $needs_quotes, true ) ) {
 			// Add missing quotes if the value was erroneously added
 			// without them.
 			$item = sprintf( "'%s'", $item );
@@ -458,15 +552,15 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
 		 *
 		 * @param array $value List of directive values.
 		 */
-		$value = apply_filters( "altis.security.browser.filter_report_only_policy_value.$name", $value );
-	
+		$value = apply_filters( "smeedijzer.security.browser.filter_report_only_policy_value.$name", $value );
+
 		/**
 		 * Filter value for a given report-only policy directive.
 		 *
 		 * @param array $value List of directive values.
 		 * @param string $name Directive name.
 		 */
-		return apply_filters( 'altis.security.browser.filter_report_only_policy_value', $value, $name );
+		return apply_filters( 'smeedijzer.security.browser.filter_report_only_policy_value', $value, $name );
 	}
 
 	/**
@@ -476,7 +570,7 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
 	 *
 	 * @param array $value List of directive values.
 	 */
-	$value = apply_filters( "altis.security.browser.filter_policy_value.$name", $value );
+	$value = apply_filters( "smeedijzer.security.browser.filter_policy_value.$name", $value );
 
 	/**
 	 * Filter value for a given policy directive.
@@ -484,7 +578,7 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
 	 * @param array $value List of directive values.
 	 * @param string $name Directive name.
 	 */
-	return apply_filters( 'altis.security.browser.filter_policy_value', $value, $name );
+	return apply_filters( 'smeedijzer.security.browser.filter_policy_value', $value, $name );
 }
 
 /**
@@ -577,7 +671,7 @@ function get_content_security_policies() : array {
 	 *
 	 * @param string[] $policies Map from directive name to value or list of values.
 	 */
-	return apply_filters( 'altis.security.browser.content_security_policies', $policies );
+	return apply_filters( 'smeedijzer.security.browser.content_security_policies', $policies );
 }
 
 /**
@@ -599,12 +693,12 @@ function get_report_only_content_security_policies() : array {
 	 *
 	 * @param string[] $policies Map from directive name to value or list of values.
 	 */
-	return apply_filters( 'altis.security.browser.report_only_content_security_policies', $policies );
+	return apply_filters( 'smeedijzer.security.browser.report_only_content_security_policies', $policies );
 }
 
 /**
  * Restrict CORS origin
- * 
+ *
  * @return mixed | WP_Error
  */
 function restrict_cors_origin( $result ) {
@@ -617,11 +711,11 @@ function restrict_cors_origin( $result ) {
 	 * @param bool $allow Whether to allow the origin.
 	 * @param string $origin The origin URL.
 	 */
-	$rest_allow_origin = apply_filters( 'altis.security.browser.rest_allow_origin', $allow, $origin );
+	$rest_allow_origin = apply_filters( 'smeedijzer.security.browser.rest_allow_origin', $allow, $origin );
 
 	if ( ! $rest_allow_origin ) {
-		return new WP_Error( 'altis.security.browser.origin_not_allowed', 'Origin is not on allowed list', [ 'status' => WP_Http::FORBIDDEN ] );
-	} 
+		return new WP_Error( 'smeedijzer.security.browser.origin_not_allowed', 'Origin is not on allowed list', [ 'status' => WP_Http::FORBIDDEN ] );
+	}
 
 	return $result;
 }

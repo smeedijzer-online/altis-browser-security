@@ -7,9 +7,21 @@ use WP_Dependencies;
 use WP_Error;
 use WP_Http;
 
-const INTEGRITY_DATA_KEY = 'smeedijzer_integrity_hash';
-const INTEGRITY_HASH_ALGO = 'sha384';
+const INTEGRITY_DATA_KEY    = 'smeedijzer_integrity_hash';
+const INTEGRITY_HASH_ALGO   = 'sha384';
 const INTEGRITY_CACHE_GROUP = 'smeedijzer_integrity';
+
+const INTERNAL_SCRIPT_REGEX   = '/<(script)((?:(?!nonce).)*?)>/';
+//const INTERNAL_SCRIPT_REGEX = '/<(script)((?:(?!nonce|src).)*?)>/';
+const INTERNAL_STYLE_REGEX    = '/<(style)((?:(?!nonce).)*?)>/';
+
+const EVENT_ATTRIBUTE_REGEX = '/<[^>]*\bid\s*=\s*[\'"](?<id>[^\'"]+)[\'"][^>]*(?<event>on(?:click|change|submit|mouseover|mouseout|load|focus|blur|keydown|keyup|keypress|contextmenu))\s*=\s*[\'"](?<script>.*?)[\'"][^>]*>/im';
+const INLINE_STYLE_REGEX = '/<(?<tag>[a-zA-Z0-9]+)(?=[^>]*\bstyle\s*=\s*[\'"](?<style>[^\'"]*?)[\'"])(?:[^>]*\bid\s*=\s*[\'"](?<id>[^\'"]+)[\'"])?[^>]*>/im';
+
+
+
+$GLOBALS['bs_injected_inline_script'] = '';
+$GLOBALS['bs_injected_inline_style']  = '';
 
 /**
  * Bootstrap.
@@ -21,8 +33,8 @@ const INTEGRITY_CACHE_GROUP = 'smeedijzer_integrity';
 function bootstrap( array $config ) {
 
 	if ( $config['automatic-integrity'] ?? true ) {
-		add_filter( 'script_loader_tag', __NAMESPACE__ . '\\generate_hash_for_script', 0, 3 );
-		add_filter( 'style_loader_tag', __NAMESPACE__ . '\\generate_hash_for_style', 0, 3 );
+        add_filter('script_loader_tag', __NAMESPACE__ . '\\generate_hash_for_script', 0, 3);
+        add_filter('style_loader_tag', __NAMESPACE__ . '\\generate_hash_for_style', 0, 3);
 	}
 
 	if ( $config['nosniff-header'] ?? true ) {
@@ -34,14 +46,14 @@ function bootstrap( array $config ) {
 	}
 
 	if ( $config['xss-protection-header'] ?? true ) {
-		add_action( 'template_redirect', __NAMESPACE__ . '\\send_xss_header' );
+        add_action('template_redirect', __NAMESPACE__ . '\\send_xss_protection_header');
 	}
 
-	$use_referrer_header = $config['referrer-header'] ?? true;
+    $use_referrer_header = $config['referrer-policy-header'] ?? true;
 
 	if ( $use_referrer_header ) {
 		add_action( 'template_redirect', function () use ( $use_referrer_header ) {
-			send_referrer_header( $use_referrer_header );
+            send_referrer_policy_header($use_referrer_header);
 		} );
 	}
 
@@ -49,22 +61,6 @@ function bootstrap( array $config ) {
 	//add_action('send_headers', function ()  {
 	//	send_origin_headers();
 	//} );
-
-
-	$inline_nonce_for = [];
-
-	if ( $config['nonce-for-inline-scripts'] ?? null ) {
-		$inline_nonce_for[] = 'script';
-	}
-
-	if ( $config['nonce-for-inline-styles'] ?? null ) {
-		$inline_nonce_for[] = 'style';
-	}
-
-	if( ! empty( $inline_nonce_for ) ){
-		output_nonce_for_inline_scripts_styles_buffer_start( $inline_nonce_for );
-		add_action('shutdown', __NAMESPACE__ . '\\output_nonce_for_inline_scripts_styles_buffer_end',  PHP_INT_MAX);
-	}
 
 	if ( $config['content-security-policy'] ?? null ) {
 		add_filter( 'smeedijzer.security.browser.content_security_policies', function ( $policies ) use ( $config ) {
@@ -78,12 +74,31 @@ function bootstrap( array $config ) {
 		}, 0 );
 	}
 
+	if ( $config['convert-event-handler-attributes'] ?? null ) {
+		add_filter( 'filter_output_final_output', __NAMESPACE__ . '\\convert_event_handler_attributes', 1, 1 );
+		add_filter( 'filter_output_final_output', __NAMESPACE__ . '\\inject_dynamic_inline_scripts', 5, 1 );
+	}
+
+	if ( $config['convert-inline-style-attributes'] ?? null ) {
+		add_filter( 'filter_output_final_output', __NAMESPACE__ . '\\convert_inline_style_attributes', 10, 1 );
+		add_filter( 'filter_output_final_output', __NAMESPACE__ . '\\inject_dynamic_inline_styles', 15, 1 );
+	}
+
+	if ( $config['nonce-for-inline-script-tags'] ?? null ) {
+		add_filter( 'filter_output_final_output', __NAMESPACE__ . '\\inject_nonce_for_inline_script_tags', 20, 1 );
+	}
+
+	if ( $config['nonce-for-internal-style-tags'] ?? null ) {
+		add_filter( 'filter_output_final_output', __NAMESPACE__ . '\\inject_nonce_for_internal_style_tags', 30, 1 );
+	}
+
 	$use_hsts = $config['strict-transport-security'] ?? null;
 
 	// Default to on for HTTPS sites.
 	if ( $use_hsts === null ) {
 		$use_hsts = is_ssl();
 	}
+
 	if ( $use_hsts ) {
 		add_action( 'parse_request', function () use ( $use_hsts ) {
 			send_hsts_header( $use_hsts );
@@ -98,7 +113,7 @@ function bootstrap( array $config ) {
 
 	add_filter( 'script_loader_tag', __NAMESPACE__ . '\\output_integrity_for_script', 0, 2 );
 	add_filter( 'style_loader_tag', __NAMESPACE__ . '\\output_integrity_for_style', 0, 3 );
-	add_action( 'template_redirect', __NAMESPACE__ . '\\send_normal_csp_header' );
+	add_action( 'template_redirect', __NAMESPACE__ . '\\send_enforced_csp_header' );
 	add_action( 'template_redirect', __NAMESPACE__ . '\\send_report_only_csp_header' );
 
 	if ( has_filter( 'smeedijzer.security.browser.rest_allow_origin' ) ) {
@@ -109,46 +124,132 @@ function bootstrap( array $config ) {
 	wp_cache_add_global_groups( INTEGRITY_CACHE_GROUP );
 }
 
-function get_nonce(): string
+function get_nonce_value(): string
 {
 	static $nonce = null;
 
-	if ($nonce === null) {
-		$nonce = bin2hex(openssl_random_pseudo_bytes(32)); // https://content-security-policy.com/nonce/
+	if ( $nonce === null ) {
+		$nonce = bin2hex( openssl_random_pseudo_bytes( 32 ) ); // https://content-security-policy.com/nonce/
 	}
 
 	return $nonce;
 }
 
-function output_nonce_for_inline_scripts_styles_buffer_start($tag = ['script'])
+function convert_event_handler_attributes( $buffer )
 {
-	ob_start( static function( $buffer ) use ( $tag ) {
-		$nonce = get_nonce(); // Replace this with your nonce retrieval function
+	$replacement = static function ( $matches ) {
+		$event_listener = substr( $matches['event'], 2 ) ?? null;
+		$script         = $matches['script'] ?? null;
+		$tag_id         = $matches['id'] ?? null;
 
-		// check if script is in array
-		if( in_array( 'script', $tag, true ) ){
-			$buffer =  preg_replace_callback( '#<script.*?>#', function ( $matches ) use ( $nonce ) {
-				return str_replace( '<script', '<script nonce="'.$nonce.'"', $matches[0] );
-			}, $buffer );
+		if ( empty( $event_listener ) || empty( $script ) ) {
+			return $matches[0];
 		}
 
-		if( in_array( 'style', $tag, true ) ){
-			$buffer = preg_replace_callback( '#<style.*?>#', function ( $matches ) use ( $nonce ) {
-				return str_replace( '<style', '<style nonce="'.$nonce.'"', $matches[0] );
-			}, $buffer );
+		if ( empty( $tag_id ) ) {
+			// Generate a unique ID if none exists
+			$tag_id = 'csp_safe_' . md5( $script );
+			// Add the ID to the tag
+			$matches[0] = preg_replace( '/^<([a-zA-Z]+)/', '<$1 id="' . $tag_id . '"', $matches[0] );
 		}
 
-		return $buffer;
-	} );
+		// Remove the inline event handler
+		$tag = preg_replace( '/\s*on[a-z]+\s*=\s*(?:\'|")[^\'"]*(?:\'|")/', '', $matches[0] );
+
+		// Create the external script with an event listener
+		$inline_script = "document.getElementById(\"$tag_id\").addEventListener(\"$event_listener\", function() {\n\t$script;\n});\n";
+
+		$GLOBALS['bs_injected_inline_script'] .= $inline_script;
+
+		return $tag;
+	};
+
+	return preg_replace_callback( EVENT_ATTRIBUTE_REGEX, $replacement, $buffer );
 }
 
-function output_nonce_for_inline_scripts_styles_buffer_end()
+function inject_dynamic_inline_scripts( $buffer )
 {
-	if (ob_get_length()) {
-		ob_end_flush(); // Send the output buffer
-		ob_flush(); // Flush the system output buffer
-		flush(); // Flush the system output buffer
+	$script_line = $GLOBALS['bs_injected_inline_script'];
+
+	if ( empty( $script_line ) ) {
+		return $buffer;
 	}
+
+	$script_tag = "<script>\n$script_line\n</script>";
+
+	// Inject the dynamic inline scripts at the end of the body
+	$buffer = preg_replace( '/<\/body>/', $script_tag . '</body>', $buffer );
+
+	return $buffer;
+}
+
+
+function convert_inline_style_attributes( $buffer ) {
+	$replacement = static function ( $matches ) {
+		$tag   = $matches['tag'] ?? null;
+		$style = $matches['style'] ?? null;
+		$id    = $matches['id'] ?? null;
+
+		if ( empty( $tag ) || empty( $style ) ) {
+			return $matches[0];
+		}
+
+		if ( empty( $id ) ) {
+			// Generate a unique ID if none exists
+			$id = 'csp_safe_' . md5( $style );
+			// Add the ID to the tag
+			$matches[0] = preg_replace( '/^<([a-zA-Z]+)/', '<$1 id="' . $id . '"', $matches[0] );
+		}
+
+		// Remove the inline style
+		$tag = preg_replace( '/\s*style\s*=\s*(?:\'|")[^\'"]*(?:\'|")/', '', $matches[0] );
+
+		// Create the external style
+		$inline_style = "#$id {\n\t$style\n}\n";
+
+		$GLOBALS['bs_injected_inline_style'] .= $inline_style;
+
+		return $tag;
+	};
+
+	return preg_replace_callback( INLINE_STYLE_REGEX, $replacement, $buffer );
+}
+
+function inject_dynamic_inline_styles( $buffer ) {
+	$style_line = $GLOBALS['bs_injected_inline_style'];
+
+	if ( empty( $style_line ) ) {
+		return $buffer;
+	}
+
+	$style_tag = "<style>\n$style_line\n</style>";
+
+	// Inject the dynamic inline styles at the end of the head
+	$buffer = preg_replace( '/<\/head>/', $style_tag . '</head>', $buffer );
+
+	return $buffer;
+}
+
+function inject_nonce_for_inline_script_tags( $buffer )
+{
+	$nonce = get_nonce_value();
+
+	$buffer = preg_replace_callback( INTERNAL_SCRIPT_REGEX, static function ( $matches ) use ( $nonce ) {
+		return str_replace( '<script', '<script nonce="' . $nonce . '"', $matches[0] );
+	}, $buffer );
+
+	return $buffer;
+}
+
+function inject_nonce_for_internal_style_tags( $buffer )
+{
+	$nonce = get_nonce_value();
+
+	$buffer = preg_replace_callback( INTERNAL_STYLE_REGEX, static function ( $matches ) use ( $nonce ) {
+		return str_replace( '<style', '<style nonce="' . $nonce . '"', $matches[0] );
+	}, $buffer );
+
+	return $buffer;
 }
 
 
@@ -201,7 +302,7 @@ function generate_hash_for_path( string $path, ?string $version = null ) : ?stri
 function generate_hash_for_style( string $html, string $handle, string $href ) : string {
 	global $wp_styles;
 
-	$err = generate_hash_for_asset( $wp_styles, $handle, $href );
+    $err = generate_hash_for_asset($wp_styles, $handle, $href);
 	if ( is_wp_error( $err ) ) {
 		trigger_error( sprintf( 'Style %s error [%s]: %s', $handle, $err->get_error_code(), $err->get_error_message() ), E_USER_NOTICE );
 	}
@@ -223,7 +324,7 @@ function generate_hash_for_style( string $html, string $handle, string $href ) :
 function generate_hash_for_script( string $tag, string $handle, string $src ) : string {
 	global $wp_scripts;
 
-	$err = generate_hash_for_asset( $wp_scripts, $handle, $src );
+    $err = generate_hash_for_asset($wp_scripts, $handle, $src);
 	if ( is_wp_error( $err ) ) {
 		trigger_error( sprintf( 'Script %s error [%s]: %s', $handle, $err->get_error_code(), $err->get_error_message() ), E_USER_NOTICE );
 	}
@@ -253,6 +354,13 @@ function generate_hash_for_asset( WP_Dependencies $dependencies, string $handle 
 	// Translate the script back to a path if possible.
 	$src = $asset->src;
 	$site_url = trailingslashit( site_url() );
+
+	$is_core_rel_url = str_starts_with( $src, '/wp-includes/' ) || str_starts_with( $src, '/wp-admin/' );
+
+	if ( $is_core_rel_url ) {
+		$src = site_url($src);
+	}
+
 	if ( substr( $src, 0, strlen( $site_url ) ) !== $site_url ) {
 		// Not a local asset, skip.
 		return null;
@@ -418,13 +526,14 @@ function output_integrity_for_script( string $tag, string $handle ) : string {
 
 	// Insert the attribute.
 	$tag = str_replace(
-		" src='",
+		" src=",
 		sprintf(
-			" integrity='%s' src='",
+			" integrity='%s' src=",
 			esc_attr( $hash )
 		),
 		$tag
 	);
+
 	return $tag;
 }
 
@@ -439,7 +548,7 @@ function output_integrity_for_script( string $tag, string $handle ) : string {
  * @return string Stylesheet tag with `integrity` attribute set if available.
  */
 function output_integrity_for_style( string $html, string $handle ) : string {
-	$hash = get_hash_for_style( $handle );
+    $hash = get_hash_for_style($handle);
 	if ( empty( $hash ) ) {
 		return $html;
 	}
@@ -464,7 +573,7 @@ function output_integrity_for_style( string $html, string $handle ) : string {
  *
  * @link https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-XSS-Protection
  */
-function send_xss_header() {
+function send_xss_protection_header() {
 	header( 'X-XSS-Protection: 1; mode=block' );
 }
 
@@ -485,7 +594,7 @@ function send_hsts_header( $value ) {
  *
  * @param string $value Referrer-Policy value.
  */
-function send_referrer_header( $value ) {
+function send_referrer_policy_header($value) {
 	if ( $value === true ) {
 		$value = 'same-origin';
 	}
@@ -523,8 +632,10 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
 		'self',
 		'unsafe-inline',
 		'unsafe-eval',
+		'unsafe-hashes',
 		'none',
 		'strict-dynamic',
+		'report-sample',
 	];
 
 	// Normalize directive values.
@@ -532,12 +643,13 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
 		$set_nonce = str_starts_with( $item, 'set-nonce' );
 
 		if($set_nonce) {
-			$item = str_replace( 'set-nonce', 'nonce-'. get_nonce(), $item );
+			$item = str_replace( 'set-nonce', 'nonce-'. get_nonce_value(), $item );
 		}
 
 		$is_nonce = str_starts_with( $item, 'nonce-' );
+		$is_hash = str_starts_with( $item, 'sha' );
 
-		if ( $is_nonce || in_array( $item, $needs_quotes, true ) ) {
+		if ( $is_nonce || $is_hash || in_array( $item, $needs_quotes, true ) ) {
 			// Add missing quotes if the value was erroneously added
 			// without them.
 			$item = sprintf( "'%s'", $item );
@@ -587,10 +699,10 @@ function filter_policy_value( string $name, $value, bool $report_only = false ) 
  * The header is only sent if policies have been specified. See
  * get_content_security_policies() for setting the policies.
  */
-function send_normal_csp_header() {
+function send_enforced_csp_header() {
 	// Gather and filter the policy parts.
 	$policies = get_content_security_policies();
-	send_csp_header( 'Content-Security-Policy', $policies );
+	send_content_security_policy_header( 'Content-Security-Policy', $policies );
 }
 
 /**
@@ -602,7 +714,7 @@ function send_normal_csp_header() {
 function send_report_only_csp_header() {
 	// Gather and filter the report-only policy parts.
 	$policies = get_report_only_content_security_policies();
-	send_csp_header( 'Content-Security-Policy-Report-Only', $policies );
+	send_content_security_policy_header( 'Content-Security-Policy-Report-Only', $policies );
 }
 
 /**
@@ -617,7 +729,7 @@ function send_report_only_csp_header() {
  *                           'Content-Security-Policy-Report-Only'.
  * @return void Sends CSP header and exits.
  */
-function send_csp_header( string $header, array $policies ) {
+function send_content_security_policy_header( string $header, array $policies ) {
 	$report_only = $header === 'Content-Security-Policy-Report-Only';
 	$policy_parts = [];
 	foreach ( $policies as $key => $value ) {

@@ -24,10 +24,10 @@ If you are using this as part of the [Altis DXP](https://www.altis-dxp.com/), co
 
 As a standalone plugin, you can use the following constants to change the behaviour of this module:
 
-* `ABS_AUTOMATIC_INTEGRITY` (`bool`): True to enable automatic generation of integrity hashes, false to disable. (True by default.)
-* `ABS_NOSNIFF_HEADER` (`bool`): True to send `X-Content-Type-Options: nosniff`, false to disable. (True by default.)
-* `ABS_FRAME_OPTIONS_HEADER` (`bool`): True to send `X-Frame-Options: SAMEORIGIN`, false to disable. (True by default.)
-* `ABS_XSS_PROTECTION_HEADER` (`bool`): True to send `X-XSS-Protection: 1; mode=block`, false to disable. (True by default.)
+* `BS_AUTOMATIC_INTEGRITY` (`bool`): True to enable automatic generation of integrity hashes, false to disable. (True by default.)
+* `BS_NOSNIFF_HEADER` (`bool`): True to send `X-Content-Type-Options: nosniff`, false to disable. (True by default.)
+* `BS_FRAME_OPTIONS_HEADER` (`bool`): True to send `X-Frame-Options: SAMEORIGIN`, false to disable. (True by default.)
+* `BS_XSS_PROTECTION_HEADER` (`bool`): True to send `X-XSS-Protection: 1; mode=block`, false to disable. (True by default.)
 
 
 ## Features
@@ -140,16 +140,16 @@ In some cases, you may want to adjust or disable these headers depending on the 
 
 The [`Strict-Transport-Security` header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Strict-Transport-Security) (sometimes called HSTS) is used to enforce HTTPS (TLS/SSL) connections when loading a site and can be used to enhance the site's security.
 
-By default, Altis adds a `Strict-Transport-Security` header if your site is served over HTTPS, with the value set to `max-age=86400` (one day). If you want to override this value (such as for longer durations, or to specify `includeSubdomains`), you can define the `ABS_HSTS` constant:
+By default, Altis adds a `Strict-Transport-Security` header if your site is served over HTTPS, with the value set to `max-age=86400` (one day). If you want to override this value (such as for longer durations, or to specify `includeSubdomains`), you can define the `BS_HSTS` constant:
 
 ```php
-define( 'ABS_HSTS', 'max-age=31536000; includeSubDomains' );
+define( 'BS_HSTS', 'max-age=31536000; includeSubDomains' );
 ```
 
 To disable the automatic behaviour entirely, set the constant to `false`:
 
 ```php
-define( 'ABS_HSTS', false );
+define( 'BS_HSTS', false );
 ```
 
 
@@ -157,10 +157,10 @@ define( 'ABS_HSTS', false );
 
 By default, Altis adds a [`X-Content-Type-Options` header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Content-Type-Options) with the value set to `nosniff`. This prevents browsers from attempting to guess the content type based on the content, and instead forces them to follow the type set in the `Content-Type` header.
 
-This should generally always be sent, and your content type should always be set explicitly. If you need to disable it, set the `ABS_NOSNIFF_HEADER` constant:
+This should generally always be sent, and your content type should always be set explicitly. If you need to disable it, set the `BS_NOSNIFF_HEADER` constant:
 
 ```php
-define( 'ABS_NOSNIFF_HEADER', false );
+define( 'BS_NOSNIFF_HEADER', false );
 ```
 
 
@@ -168,10 +168,10 @@ define( 'ABS_NOSNIFF_HEADER', false );
 
 By default, Altis adds a [`X-Frame-Options` header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Frame-Options) with the value set to `sameorigin`. This prevents your site from being iframed into another site, which can prevent [clickjacking attacks](https://en.wikipedia.org/wiki/Clickjacking).
 
-This should generally always be sent, but in some cases, you may want to allow specific sites to iframe your site, or allow any sites. To disable the automatic header, set the `ABS_FRAME_OPTIONS_HEADER` constant:
+This should generally always be sent, but in some cases, you may want to allow specific sites to iframe your site, or allow any sites. To disable the automatic header, set the `BS_FRAME_OPTIONS_HEADER` constant:
 
 ```php
-define( 'ABS_FRAME_OPTIONS_HEADER', false );
+define( 'BS_FRAME_OPTIONS_HEADER', false );
 ```
 
 You can then send your own headers as needed. We recommend hooking into the `template_redirect` hook to send these headers.
@@ -181,10 +181,10 @@ You can then send your own headers as needed. We recommend hooking into the `tem
 
 By default, Altis adds a [`X-XSS-Protection` header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-XSS-Protection?) with the value set to `1; mode=block`. This prevents browsers from loading if they detect [cross-site scripting (XSS) attacks](https://www.owasp.org/index.php/Cross-site_Scripting_(XSS)).
 
-This should generally always be sent. If you need to disable it, set the `ABS_XSS_PROTECTION_HEADER` header:
+This should generally always be sent. If you need to disable it, set the `BS_XSS_PROTECTION_HEADER` header:
 
 ```php
-define( 'ABS_XSS_PROTECTION_HEADER', false );
+define( 'BS_XSS_PROTECTION_HEADER', false );
 ```
 
 ### Restrict CORS origins
